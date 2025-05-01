@@ -3,8 +3,8 @@ name: Deploy Eureka
 on:
   push:
     branches:
-      - feat/cicd  # 브랜치 push 시 자동 실행
-  workflow_dispatch:  # 수동 실행도 가능
+      - feat/cicd
+  workflow_dispatch:
 
 env:
   AWS_REGION: ap-northeast-2
@@ -87,29 +87,35 @@ jobs:
 
       - name: Deploy to Eureka EC2 via Bastion
         run: |
-          # 필요한 파일 전송
+          # 파일 전송
           scp -o StrictHostKeyChecking=no docker-compose.yml .env eureka:/home/ubuntu/server/
 
-          # 배포 실행
+          # EC2에 접속해 배포 수행
           ssh eureka <<EOF
             cd ~/server
 
-            # docker compose가 없으면 설치 (Compose V2)
-            if ! command -v docker compose &> /dev/null; then
-              echo "Installing Docker Compose..."
+            # Docker 및 Compose V2 설치
+            if ! command -v docker &> /dev/null; then
+              echo "Installing Docker..."
               sudo apt update
               sudo apt install -y docker.io
-              sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.2/docker-compose-linux-x86_64" -o /usr/local/lib/docker/cli-plugins/docker-compose
-              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-              mkdir -p ~/.docker/cli-plugins
-              ln -s /usr/local/lib/docker/cli-plugins/docker-compose ~/.docker/cli-plugins/docker-compose
+              sudo systemctl enable docker
+              sudo systemctl start docker
+              sudo usermod -aG docker ubuntu
             fi
 
-            # ECR 인증
+            if ! docker compose version &> /dev/null; then
+              echo "Installing Docker Compose V2..."
+              sudo mkdir -p /usr/local/lib/docker/cli-plugins
+              sudo curl -SL https://github.com/docker/compose/releases/download/v2.24.2/docker-compose-linux-x86_64 \
+                -o /usr/local/lib/docker/cli-plugins/docker-compose
+              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+            fi
+
+            # ECR 로그인 (IAM 역할 기반)
             aws ecr get-login-password --region ap-northeast-2 | \
               docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
 
-            # 기존 컨테이너 정리 및 최신 이미지 pull
             docker compose down --remove-orphans
             docker compose pull
             docker system prune -af
