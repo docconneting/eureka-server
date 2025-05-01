@@ -81,31 +81,35 @@ jobs:
           IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}
 
           ssh eureka <<EOF
-            echo "Deploying image: $IMAGE"
+          echo "Deploying image: $IMAGE"
 
-            # Docker 미설치 시 설치
-            if ! command -v docker &> /dev/null; then
-              echo "Installing Docker..."
-              sudo apt update
-              sudo apt install -y docker.io
-              sudo systemctl enable docker
-              sudo systemctl start docker
-              sudo usermod -aG docker ubuntu
-            fi
+          # Docker 미설치 시 설치
+          if ! command -v docker &> /dev/null; then
+          echo "Installing Docker..."
+          sudo apt update
+          sudo apt install -y docker.io
+          sudo systemctl enable docker
+          sudo systemctl start docker
+          sudo usermod -aG docker ubuntu
+          fi
 
-            # 컨테이너 정리
-            sudo docker stop eureka || true
-            sudo docker rm eureka || true
-            sudo docker container prune -f
-            sudo docker image prune -a -f
-            sudo docker volume prune -f
-            sudo docker network prune -f
+          # AWS CLI로 ECR 로그인
+          aws ecr get-login-password --region ap-northeast-2 | \
+          sudo docker login --username AWS --password-stdin 360353662424.dkr.ecr.ap-northeast-2.amazonaws.com
 
-            # 최신 이미지 pull 및 실행
-            sudo docker pull $IMAGE
-            sudo docker run -d \
-              --name eureka \
-              --env-file ~/eureka.env \
-              -p 8761:8761 \
-              $IMAGE
+          # 기존 컨테이너 정리
+          sudo docker stop eureka || true
+          sudo docker rm eureka || true
+          sudo docker container prune -f
+          sudo docker image prune -a -f
+          sudo docker volume prune -f
+          sudo docker network prune -f
+
+          # 최신 이미지 Pull 및 실행
+          sudo docker pull $IMAGE
+          sudo docker run -d \
+          --name eureka \
+          --env-file ~/eureka.env \
+          -p 8761:8761 \
+          $IMAGE
           EOF
