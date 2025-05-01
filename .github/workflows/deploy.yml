@@ -28,7 +28,7 @@ jobs:
 
       # 3. AWS 자격 증명 설정
       - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v3
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
@@ -37,7 +37,7 @@ jobs:
       # 4. ECR 로그인
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v3
 
       # 5. Docker 이미지 빌드
       - name: Build Docker Image
@@ -79,7 +79,7 @@ jobs:
           # EC2 내부에서 사용할 .env 파일 생성
           ssh eureka "echo 'SPRING_PROFILES_ACTIVE=prod' > ~/eureka.env"
 
-      # 8. EC2에서 컨테이너 실행
+      # 8. EC2에서 컨테이너 실행 및 청소
       - name: Deploy to EC2
         run: |
           ssh eureka <<'EOF'
@@ -95,4 +95,10 @@ jobs:
               --env-file ~/eureka.env \
               -p 8761:8761 \
               ${{ steps.login-ecr.outputs.registry }}/$IMAGE_NAME
+
+            # 사용하지 않는 리소스 정리
+            docker container prune -f
+            docker image prune -a -f
+            docker volume prune -f
+            docker network prune -f
           EOF
