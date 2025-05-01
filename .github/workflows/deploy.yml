@@ -8,51 +8,43 @@ on:
 
 env:
   AWS_REGION: ap-northeast-2
-  IMAGE_NAME: eureka-service  # ECR 리포지토리명 + Docker 이미지명
+  ECR_REPOSITORY: eureka-service
+  IMAGE_TAG: latest
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. GitHub 코드 체크아웃
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 2. Java 17 설치
-      - name: Set up JDK 17
+      - name: Set up JDK
         uses: actions/setup-java@v3
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # 3. AWS 인증 설정
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v3
+      - name: Build with Gradle
+        run: ./gradlew clean bootJar -x test
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 4. ECR 로그인
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
-      # 5. Docker 이미지 빌드
-      - name: Build Docker Image
+      - name: Build and Push Docker Image
         run: |
-          ./gradlew bootJar
-          docker build -t $IMAGE_NAME:latest .
+          docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
+          docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
-      # 6. Docker 이미지 태깅 및 ECR Push
-      - name: Tag and Push to ECR
-        run: |
-          docker tag $IMAGE_NAME:latest ${{ steps.login-ecr.outputs.registry }}/$IMAGE_NAME
-          docker push ${{ steps.login-ecr.outputs.registry }}/$IMAGE_NAME
-
-      # 7. SSH 및 .env 파일 구성
-      - name: Prepare SSH and .env
+      - name: Prepare SSH and .env for Eureka
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.DOCCONNETING_SSH_KEY }}" | base64 --decode > ~/.ssh/docconneting.pem
@@ -73,43 +65,53 @@ jobs:
             StrictHostKeyChecking no
           EOF
 
-          ssh eureka "echo 'SPRING_PROFILES_ACTIVE=prod' > ~/eureka.env"
+          # 환경 변수 파일 생성
+          cat <<EOF > .env
+          SPRING_PROFILES_ACTIVE=prod
+          SERVER_PORT=8761
+          EOF
 
-      # 8. EC2 배포 (Docker 설치 포함)
-      - name: Deploy to EC2
+      - name: Generate docker-compose.yml for Eureka
         run: |
-          IMAGE=${{ steps.login-ecr.outputs.registry }}/${{ env.IMAGE_NAME }}
+          cat <<EOF > docker-compose.yml
+          services:
+            eureka:
+              image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+              container_name: eureka
+              restart: always
+              ports:
+                - "8761:8761"
+              env_file:
+                - .env
+          EOF
 
+      - name: Deploy to Eureka EC2 via Bastion
+        run: |
+          # 필요한 파일 전송
+          scp -o StrictHostKeyChecking=no docker-compose.yml .env eureka:/home/ubuntu/server/
+
+          # 배포 실행
           ssh eureka <<EOF
-          echo "Deploying image: $IMAGE"
+            cd ~/server
 
-          # Docker 미설치 시 설치
-          if ! command -v docker &> /dev/null; then
-          echo "Installing Docker..."
-          sudo apt update
-          sudo apt install -y docker.io
-          sudo systemctl enable docker
-          sudo systemctl start docker
-          sudo usermod -aG docker ubuntu
-          fi
+            # docker compose가 없으면 설치 (Compose V2)
+            if ! command -v docker compose &> /dev/null; then
+              echo "Installing Docker Compose..."
+              sudo apt update
+              sudo apt install -y docker.io
+              sudo curl -L "https://github.com/docker/compose/releases/download/v2.24.2/docker-compose-linux-x86_64" -o /usr/local/lib/docker/cli-plugins/docker-compose
+              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+              mkdir -p ~/.docker/cli-plugins
+              ln -s /usr/local/lib/docker/cli-plugins/docker-compose ~/.docker/cli-plugins/docker-compose
+            fi
 
-          # AWS CLI로 ECR 로그인
-          aws ecr get-login-password --region ap-northeast-2 | \
-          sudo docker login --username AWS --password-stdin 360353662424.dkr.ecr.ap-northeast-2.amazonaws.com
+            # ECR 인증
+            aws ecr get-login-password --region ap-northeast-2 | \
+              docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
 
-          # 기존 컨테이너 정리
-          sudo docker stop eureka || true
-          sudo docker rm eureka || true
-          sudo docker container prune -f
-          sudo docker image prune -a -f
-          sudo docker volume prune -f
-          sudo docker network prune -f
-
-          # 최신 이미지 Pull 및 실행
-          sudo docker pull $IMAGE
-          sudo docker run -d \
-          --name eureka \
-          --env-file ~/eureka.env \
-          -p 8761:8761 \
-          $IMAGE
+            # 기존 컨테이너 정리 및 최신 이미지 pull
+            docker compose down --remove-orphans
+            docker compose pull
+            docker system prune -af
+            docker compose up -d
           EOF
