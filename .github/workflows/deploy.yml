@@ -3,33 +3,33 @@ name: Deploy Eureka
 on:
   push:
     branches:
-      - main
-  workflow_dispatch:
+      - main  # main 브랜치에 push 될 때 실행
+  workflow_dispatch:  # 수동 실행도 허용
 
 env:
   AWS_REGION: ap-northeast-2
-  ECR_REPOSITORY: eureka-service
-  IMAGE_TAG: latest
+  ECR_REPOSITORY: eureka-service  # ECR에 저장될 리포지토리 이름
+  IMAGE_TAG: latest  # 사용할 이미지 태그
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # GitHub Actions에서 사용할 호스트 환경
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4  # 현재 저장소의 코드를 가져옴
 
       - name: Set up JDK
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v3  # Java 17 환경 설정
         with:
           java-version: '17'
           distribution: 'temurin'
 
       - name: Build with Gradle
-        run: ./gradlew clean bootJar -x test
+        run: ./gradlew clean bootJar -x test  # 테스트 제외하고 JAR 빌드
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v2  # AWS 인증 정보 설정
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
@@ -37,19 +37,22 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v2  # ECR에 로그인하여 이미지 푸시 가능하게 함
 
       - name: Build and Push Docker Image
         run: |
+          # Docker 이미지 빌드 및 ECR로 푸시
           docker build -t ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
           docker push ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
       - name: Prepare SSH and .env for Eureka
         run: |
+          # SSH 키 설정 (bastion 서버 및 eureka 서버 접근용)
           mkdir -p ~/.ssh
           echo "${{ secrets.DOCCONNETING_SSH_KEY }}" | base64 --decode > ~/.ssh/docconneting.pem
           chmod 600 ~/.ssh/docconneting.pem
 
+          # SSH 구성: bastion → eureka로 프록시 접속
           cat <<EOF > ~/.ssh/config
           Host bastion
             HostName ${{ secrets.BASTION_HOST }}
@@ -65,7 +68,7 @@ jobs:
             StrictHostKeyChecking no
           EOF
 
-          # 환경 변수 파일 생성
+          # Docker Compose에서 사용할 환경 변수 파일 생성
           cat <<EOF > .env
           SPRING_PROFILES_ACTIVE=prod
           SERVER_PORT=8761
@@ -73,6 +76,7 @@ jobs:
 
       - name: Generate docker-compose.yml for Eureka
         run: |
+          # 도커 컴포즈 설정 파일 생성
           cat <<EOF > docker-compose.yml
           services:
             eureka:
@@ -87,37 +91,20 @@ jobs:
 
       - name: Deploy to Eureka EC2 via Bastion
         run: |
-          # 파일 전송
+          # 컴포즈 파일 및 환경 변수 파일을 EC2 서버로 복사
           scp -o StrictHostKeyChecking=no docker-compose.yml .env eureka:/home/ubuntu/server/
 
-          # EC2에 접속해 배포 수행
+          # 서버에 SSH 접속하여 도커 배포 작업 실행
           ssh eureka <<EOF
             cd ~/server
 
-            # Docker 및 Compose V2 설치
-            if ! command -v docker &> /dev/null; then
-              echo "Installing Docker..."
-              sudo apt update
-              sudo apt install -y docker.io
-              sudo systemctl enable docker
-              sudo systemctl start docker
-              sudo usermod -aG docker ubuntu
-            fi
-
-            if ! docker compose version &> /dev/null; then
-              echo "Installing Docker Compose V2..."
-              sudo mkdir -p /usr/local/lib/docker/cli-plugins
-              sudo curl -SL https://github.com/docker/compose/releases/download/v2.24.2/docker-compose-linux-x86_64 \
-                -o /usr/local/lib/docker/cli-plugins/docker-compose
-              sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-            fi
-
-            # ECR 로그인 (IAM 역할 기반)
+            # ECR 로그인 수행
             aws ecr get-login-password --region ap-northeast-2 | \
               docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }}
 
+            # 기존 컨테이너 종료 및 삭제
             docker compose down --remove-orphans
-            docker compose pull
-            docker system prune -af
-            docker compose up -d
+            docker compose pull  # 최신 이미지 가져오기
+            docker system prune -af  # 불필요한 이미지/컨테이너 정리
+            docker compose up -d  # 백그라운드에서 서비스 실행
           EOF
